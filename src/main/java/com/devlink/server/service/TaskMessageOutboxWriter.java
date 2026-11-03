@@ -10,18 +10,22 @@ import org.springframework.stereotype.Component;
 
 @Component
 @RequiredArgsConstructor
-public class TaskQuestionOutboxWriter {
-    private static final String TYPE = "TASK_QUESTION_CREATED";
+public class TaskMessageOutboxWriter {
     private static final String DESTINATION = "task-events";
 
     private final OutboxEventRepository outbox;
     private final ObjectMapper objectMapper;
 
     public void enqueue(TaskEvent event, Long receiverAgentId) {
+        String type = switch (event.getEventType()) {
+            case QUESTION -> "TASK_QUESTION_CREATED";
+            case ANSWER -> "TASK_ANSWER_CREATED";
+            default -> throw new IllegalArgumentException("Expected QUESTION or ANSWER");
+        };
         UUID outboxId = UUID.randomUUID();
         var envelope = objectMapper.createObjectNode()
                 .put("event_id", outboxId.toString())
-                .put("type", TYPE)
+                .put("type", type)
                 .put("task_id", event.getTaskId())
                 .put("receiver_agent_id", receiverAgentId);
         envelope.putObject("payload")
@@ -30,6 +34,6 @@ public class TaskQuestionOutboxWriter {
                 .put("event_type", event.getEventType().name());
 
         String taskId = event.getTaskId().toString();
-        outbox.save(OutboxEvent.create(outboxId, TYPE, "TASK", taskId, DESTINATION, "TASK:" + taskId, envelope));
+        outbox.save(OutboxEvent.create(outboxId, type, "TASK", taskId, DESTINATION, "TASK:" + taskId, envelope));
     }
 }

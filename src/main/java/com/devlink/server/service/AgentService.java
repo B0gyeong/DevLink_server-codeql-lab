@@ -9,7 +9,9 @@ import com.devlink.server.dto.CreateAgentRequest;
 import com.devlink.server.repository.AgentRepository;
 import com.devlink.server.repository.TaskRepository;
 import com.devlink.server.realtime.AgentCredentialsChangedEvent;
+import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,7 +35,21 @@ public class AgentService {
         authorization.requireTeamMember(userId, teamId);
         Agent agent = Agent.create(teamId, userId, request.name(), request.roleDescription(),
                 request.toolType(), request.projectName());
-        return AgentResponse.from(agents.saveAndFlush(agent));
+        return saveAgent(agent);
+    }
+
+    private AgentResponse saveAgent(Agent agent) {
+        try {
+            return AgentResponse.from(agents.saveAndFlush(agent));
+        } catch (DataIntegrityViolationException exception) {
+            for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+                if (cause instanceof ConstraintViolationException violation
+                        && "uk_agents_team_name_tool_type".equals(violation.getConstraintName())) {
+                    throw new BusinessException(ErrorCode.AGENT_ALREADY_EXISTS);
+                }
+            }
+            throw exception;
+        }
     }
 
     @Transactional(readOnly = true)

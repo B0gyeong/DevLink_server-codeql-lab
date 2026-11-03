@@ -12,7 +12,6 @@ import com.devlink.server.dto.task.TaskMessageItem;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-/** develop V7의 Task별 sequence로 복구하며 추가 컬럼·수신함 테이블이 필요 없다. */
 @Repository
 public class TaskMessageRepository {
     private final NamedParameterJdbcTemplate named;
@@ -51,7 +50,6 @@ public class TaskMessageRepository {
                 .addValue("teamId", agent.teamId()).addValue("agentId", agent.agentId())
                 .addValue("positions", encoded).addValue("afterTaskId", afterTaskId).addValue("limit", limit);
         // Task를 순환해 한 Task의 연속 메시지가 다른 Task의 복구를 막지 않게 한다.
-        // outbox나 Task 상태를 조건으로 사용하지 않아 알림 실패·작업 종료 후에도 복구한다.
         return named.query(sql, parameters, (row, index) -> new TaskMessageItem(
                 Long.toString(row.getLong("id")), row.getLong("task_id"),
                 Long.toString(row.getLong("sequence")), row.getString("event_type"),

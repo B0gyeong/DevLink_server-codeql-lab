@@ -46,7 +46,7 @@ class DevLinkServerIntegrationTest extends AbstractIntegrationTest {
         List<String> tables = jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class);
         assertThat(tables).containsExactlyInAnyOrder("users", "teams", "team_members", "agents",
-                "tasks", "task_files", "task_events", "outbox_events", "task_message_sync_settings", "flyway_schema_history");
+                "tasks", "task_files", "task_events", "outbox_events", "flyway_schema_history");
 
         var health = rest.getForEntity("/api/v1/health", JsonNode.class);
         assertThat(health.getStatusCode()).isEqualTo(HttpStatus.OK);

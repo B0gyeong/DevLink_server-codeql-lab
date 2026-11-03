@@ -33,20 +33,12 @@ public class TaskMessageSyncService {
         if (limit < 1 || limit > 100) throw new BusinessException(ErrorCode.VALIDATION_FAILED);
         requireCurrentAgent(agent);
         var position = cursors.decode(cursor, agent);
-        // 한 요청 안의 권한 검사·현재 창·조회는 같은 DB 스냅샷을 사용한다.
-        String window = position.windowSnapshot() == null ? messages.currentSnapshot() : position.windowSnapshot();
-        var candidates = messages.findReceived(agent, position.previousSnapshot(), window,
-                position.afterTaskId(), position.afterSequence(), limit + 1);
+        // develop V7이 같은 Task의 삽입을 직렬화한다. Task별 sequence는 커밋 전에 추월되지 않는다.
+        var candidates = messages.findReceived(agent, position.positions(), position.afterTaskId(), limit + 1);
         boolean hasNext = candidates.size() > limit;
         var items = candidates.subList(0, Math.min(limit, candidates.size()));
-        TaskMessageCursorCodec.Cursor next;
-        if (hasNext) {
-            var last = items.getLast();
-            next = position.page(window, last.taskId(), Long.parseLong(last.sequence()));
-        } else {
-            // 빈 결과여도 완료 창을 반환한다. 당시 미커밋이던 이벤트는 다음 창에서 다시 검사한다.
-            next = position.complete(window);
-        }
+        // 실제 반환한 항목의 Task 위치만 갱신한다. 빈 결과에서는 기존 위치를 유지한다.
+        var next = position.advance(items);
         return new TaskMessageSyncResponse(items, cursors.encode(next), hasNext);
     }
 

@@ -29,7 +29,6 @@ import com.devlink.server.domain.teammember.TeamMember;
 import com.devlink.server.domain.user.User;
 import com.devlink.server.repository.AgentRepository;
 import com.devlink.server.repository.TaskEventRepository;
-import com.devlink.server.repository.TaskMessageRepository;
 import com.devlink.server.repository.TaskRepository;
 import com.devlink.server.repository.TeamMemberRepository;
 import com.devlink.server.repository.TeamRepository;
@@ -43,6 +42,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.flywaydb.core.Flyway;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -58,7 +58,7 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
     @Autowired private AgentRepository agents;
     @Autowired private TaskRepository tasks;
     @Autowired private TaskEventRepository events;
-    @Autowired private TaskMessageRepository messages;
+    @Value("${devlink.task-message-sync.cursor-secret}") private String cursorSecret;
     @Autowired private PlatformTransactionManager transactions;
     @Autowired private DataSource dataSource;
     @Autowired private JdbcTemplate jdbc;
@@ -145,7 +145,7 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void paginatesOneFixedWindowAndReplaysSameCursorWithoutDuplicates() throws Exception {
+    void paginatesTasksFairlyAndReplaysSameCursorWithoutDuplicates() throws Exception {
         long one = event(firstTask, b, "QUESTION");
         long two = event(firstTask, b, "ANSWER");
         long three = event(secondTask, b, "QUESTION");
@@ -156,18 +156,19 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
         long newer = event(firstTask, b, "ANSWER");
 
         JsonNode pageTwo = success(pull(a, cursor, "1"));
-        assertIds(pageTwo, two);
-        assertIds(success(pull(a, cursor, "1")), two);
+        assertIds(pageTwo, three);
+        assertIds(success(pull(a, cursor, "1")), three);
         JsonNode pageThree = success(pull(a, pageTwo.path("nextCursor").asText(), "1"));
-        assertIds(pageThree, three);
-        assertThat(pageThree.path("hasNext").asBoolean()).isFalse();
-        JsonNode nextWindow = success(pull(a, pageThree.path("nextCursor").asText(), "1"));
-        assertIds(nextWindow, newer);
-        assertIds(success(pull(a, nextWindow.path("nextCursor").asText(), "1")));
+        assertIds(pageThree, two);
+        assertThat(pageThree.path("hasNext").asBoolean()).isTrue();
+        JsonNode pageFour = success(pull(a, pageThree.path("nextCursor").asText(), "1"));
+        assertIds(pageFour, newer);
+        assertThat(pageFour.path("hasNext").asBoolean()).isFalse();
+        assertIds(success(pull(a, pageFour.path("nextCursor").asText(), "1")));
     }
 
     @Test
-    void lowerEventIdCommittedAfterHigherIdIsRecoveredInNextWindow() throws Exception {
+    void lowerEventIdCommittedAfterHigherIdIsRecoveredWithPerTaskPositions() throws Exception {
         try (Connection slow = dataSource.getConnection()) {
             slow.setAutoCommit(false);
             long late = insert(slow, firstTask, b.id(), "QUESTION");
@@ -197,9 +198,11 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
             slow.commit();
 
             JsonNode pageTwo = success(pull(a, pageOne.path("nextCursor").asText(), "1"));
-            assertIds(pageTwo, second);
-            assertThat(pageTwo.path("hasNext").asBoolean()).isFalse();
-            assertIds(success(pull(a, pageTwo.path("nextCursor").asText(), "1")), late);
+            assertIds(pageTwo, late);
+            assertThat(pageTwo.path("hasNext").asBoolean()).isTrue();
+            JsonNode pageThree = success(pull(a, pageTwo.path("nextCursor").asText(), "1"));
+            assertIds(pageThree, second);
+            assertThat(pageThree.path("hasNext").asBoolean()).isFalse();
         }
     }
 
@@ -236,7 +239,8 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
         JsonNode data = success(pull(a, null, null));
         assertIds(data, first, second);
         assertThat(data.path("items").get(0).path("sequence").asText()).isEqualTo("1");
-        assertThat(data.path("items").get(1).path("sequence").asText()).isEqualTo("2");
+        // 답변 대상 질문도 원본 이력에 저장되지만 본인 작성이므로 수신 목록에서는 제외된다.
+        assertThat(Long.parseLong(data.path("items").get(1).path("sequence").asText())).isGreaterThan(1);
     }
 
     @Test
@@ -291,8 +295,8 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
         assertError(pull(a, replacement + cursor.substring(1), null), 400, "VALIDATION_FAILED");
         assertError(pull(b, cursor, null), 403, "ACCESS_DENIED");
         assertError(pull(outsider, cursor, null), 403, "ACCESS_DENIED");
-        // 서명키가 프로세스 메모리의 임시 값이 아니므로 새 codec 인스턴스에서도 검증된다.
-        var codec = new TaskMessageCursorCodec(json, messages);
+        // DB 테이블 없이 동일한 환경설정 키만으로 재시작·다중 인스턴스의 cursor를 검증한다.
+        var codec = new TaskMessageCursorCodec(json, cursorSecret);
         assertThat(codec.decode(cursor, new AgentPrincipal(a.id(), a.ownerId(), a.teamId())).agentId()).isEqualTo(a.id());
     }
 
@@ -303,6 +307,19 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
                     .header("Authorization", "Bearer " + a.token()).POST(HttpRequest.BodyPublishers.noBody()).build();
             assertError(client.send(request, HttpResponse.BodyHandlers.ofString()), 405, "METHOD_NOT_ALLOWED");
         }
+    }
+
+    @Test
+    void compressedCursorPreservesManyIndependentTaskPositionsAcrossInstances() {
+        var positions = new java.util.TreeMap<Long, Long>();
+        for (long taskId = 1; taskId <= 1000; taskId++) positions.put(taskId, taskId * 2);
+        var cursor = new TaskMessageCursorCodec.Cursor(2, a.id(), a.ownerId(), a.teamId(), positions, 1000);
+        var writer = new TaskMessageCursorCodec(json, cursorSecret);
+        var reader = new TaskMessageCursorCodec(json, cursorSecret);
+        String token = writer.encode(cursor);
+        assertThat(token.length()).isLessThan(8000);
+        assertThat(reader.decode(token, new AgentPrincipal(a.id(), a.ownerId(), a.teamId())).positions())
+                .isEqualTo(positions);
     }
 
     @Test
@@ -331,13 +348,14 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
         try (Connection connection = dataSource.getConnection()) {
             connection.setSchema(schema);
             try (var statement = connection.createStatement(); var rows = statement.executeQuery(
-                    "SELECT event_type, content, sequence, author_agent_id, sync_xid FROM task_events ORDER BY sequence")) {
+                    "SELECT event_type, content, sequence, author_agent_id, question_event_id, request_key FROM task_events ORDER BY sequence")) {
                 for (String expected : List.of("CREATED", "ACK_RECEIVED", "PROGRESS")) {
                     assertThat(rows.next()).isTrue();
                     assertThat(rows.getString("event_type")).isEqualTo(expected);
                     assertThat(rows.getString("content")).isNotBlank();
                     assertThat(rows.getObject("author_agent_id")).isNull();
-                    assertThat(rows.getString("sync_xid")).isNotBlank();
+                    assertThat(rows.getObject("question_event_id")).isNull();
+                    assertThat(rows.getObject("request_key")).isNull();
                 }
                 assertThat(rows.next()).isFalse();
             } finally {
@@ -347,17 +365,31 @@ class TaskMessageSyncIntegrationTest extends AbstractIntegrationTest {
     }
 
     private long event(long taskId, TestAgent author, String type) {
-        return events.saveAndFlush(TaskEvent.message(taskId, TaskEventType.valueOf(type), author.id(), "본문")).getId();
+        Long questionId = null;
+        if ("ANSWER".equals(type)) {
+            var task = tasks.findById(taskId).orElseThrow();
+            long questionAuthor = task.getRequesterAgentId() == author.id()
+                    ? task.getReceiverAgentId() : task.getRequesterAgentId();
+            var questions = jdbc.queryForList("""
+                    SELECT id FROM task_events WHERE task_id = ? AND author_agent_id = ?
+                      AND event_type = 'QUESTION' ORDER BY sequence LIMIT 1
+                    """, Long.class, taskId, questionAuthor);
+            questionId = questions.isEmpty() ? events.saveAndFlush(TaskEvent.of(taskId, TaskEventType.QUESTION,
+                    "답변 대상 질문", questionAuthor, null, UUID.randomUUID().toString())).getId() : questions.getFirst();
+        }
+        return events.saveAndFlush(TaskEvent.of(taskId, TaskEventType.valueOf(type), "본문", author.id(),
+                questionId, UUID.randomUUID().toString())).getId();
     }
 
     private long insert(Connection connection, long taskId, long author, String type) throws Exception {
         try (var statement = connection.prepareStatement("""
-                INSERT INTO task_events (task_id, author_agent_id, event_type, content)
-                VALUES (?, ?, ?, '본문') RETURNING id
+                INSERT INTO task_events (task_id, author_agent_id, event_type, content, request_key)
+                VALUES (?, ?, ?, '본문', ?) RETURNING id
                 """)) {
             statement.setLong(1, taskId);
             statement.setLong(2, author);
             statement.setString(3, type);
+            statement.setString(4, UUID.randomUUID().toString());
             try (var result = statement.executeQuery()) {
                 result.next();
                 return result.getLong(1);

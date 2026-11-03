@@ -1,11 +1,11 @@
 package com.devlink.server.domain.taskevent;
 
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import jakarta.persistence.*;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.Generated;
 
 // Bounded context: task.
 @Entity
@@ -21,6 +21,19 @@ public class TaskEvent {
     @Column(name = "task_id", length = 255, nullable = false)
     private Long taskId;
 
+    @Generated
+    @Column(name = "sequence", nullable = false, insertable = false, updatable = false)
+    private Long sequence;
+
+    @Column(name = "author_agent_id")
+    private Long authorAgentId;
+
+    @Column(name = "question_event_id")
+    private Long questionEventId;
+
+    @Column(name = "request_key", length = 64)
+    private String requestKey;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "event_type", length = 30, nullable = false)
     private TaskEventType eventType;
@@ -28,53 +41,40 @@ public class TaskEvent {
     @Column(name = "content", length = 255, nullable = true, columnDefinition = "TEXT")
     private String content;
 
-    // 질문·답변 작성자는 POST에서 검증한 Agent 신원으로 지정한다.
-    @Column(name = "author_agent_id")
-    private Long authorAgentId;
-
-    // 같은 Task의 삽입 순서는 DB가 Task 행 잠금 안에서 부여한다.
-    @Column(name = "sequence", nullable = false, insertable = false, updatable = false)
-    private Long sequence;
-
     @Column(name = "created_at", length = 255, nullable = false, columnDefinition = "TIMESTAMP(3)")
     private LocalDateTime createdAt;
 
     public static TaskEvent of(Long taskId, TaskEventType type, String content) {
+        return of(taskId, type, content, null, null, null);
+    }
+
+    public static TaskEvent of(Long taskId, TaskEventType type, String content,
+            Long authorAgentId, Long questionEventId, String requestKey) {
         requireValue(taskId, "taskId");
         requireValue(type, "eventType");
         if (type == TaskEventType.QUESTION || type == TaskEventType.ANSWER) {
-            throw new IllegalArgumentException("질문·답변에는 작성 Agent가 필요합니다.");
+            requireValue(authorAgentId, "authorAgentId");
+            requireValue(requestKey, "requestKey");
+            if (requestKey.length() > 64) {
+                throw new IllegalArgumentException("requestKey must be at most 64 characters");
+            }
+        }
+        if ((type == TaskEventType.ANSWER) != (questionEventId != null)) {
+            throw new IllegalArgumentException("questionEventId is required only for ANSWER");
         }
         TaskEvent entity = new TaskEvent();
         entity.taskId = taskId;
         entity.eventType = type;
         entity.content = content;
-        return entity;
-    }
-
-    /** POST 담당자가 참여 권한·상태·질문 참조를 검증한 뒤 사용하는 저장 진입점이다. */
-    public static TaskEvent message(Long taskId, TaskEventType type, Long authorAgentId, String content) {
-        requireValue(taskId, "taskId");
-        requireValue(authorAgentId, "authorAgentId");
-        requireValue(content, "content");
-        if (taskId <= 0 || authorAgentId <= 0
-                || (type != TaskEventType.QUESTION && type != TaskEventType.ANSWER)) {
-            throw new IllegalArgumentException("질문·답변의 Task·작성자·유형이 올바르지 않습니다.");
-        }
-        TaskEvent entity = new TaskEvent();
-        entity.taskId = taskId;
-        entity.eventType = type;
         entity.authorAgentId = authorAgentId;
-        entity.content = content;
-        entity.createdAt = LocalDateTime.now(ZoneOffset.UTC);
+        entity.questionEventId = questionEventId;
+        entity.requestKey = requestKey;
         return entity;
     }
 
     @PrePersist
     private void initializeTimestamp() {
-        if (this.createdAt == null) {
-            this.createdAt = LocalDateTime.now();
-        }
+        this.createdAt = LocalDateTime.now();
     }
 
     private static void requireValue(Object value, String field) {

@@ -11,6 +11,8 @@ public enum TaskEventType {
     // 3. 작업 실행
     STATUS_CHANGED,
     PROGRESS,
+    QUESTION,
+    ANSWER,
     // 4. 알림 실패
     NOTIFY_FAILED
 }

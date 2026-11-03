@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -40,16 +41,17 @@ public class AgentController {
 
     @GetMapping("/teams/{teamId}")
     public ApiResponse<List<AgentResponse>> list(@PathVariable @Positive Long teamId,
+            @RequestParam(name = "ownedByMe", defaultValue = "false") boolean ownedByMe,
             @AuthenticationPrincipal Object principal) {
         if (principal instanceof AgentPrincipal agent) {
             // Agent 토큰은 해당 Agent가 속한 팀의 목록만 조회 허용
             if (agent.teamId() != teamId.longValue()) {
                 throw new BusinessException(ErrorCode.ACCESS_DENIED);
             }
-            return ApiResponse.success(agents.list(agent.ownerUserId(), teamId));
+            return ApiResponse.success(agents.list(agent.ownerUserId(), teamId, ownedByMe));
         }
         if (principal instanceof UserPrincipal user) {
-            return ApiResponse.success(agents.list(userId(user), teamId));
+            return ApiResponse.success(agents.list(userId(user), teamId, ownedByMe));
         }
         throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
     }

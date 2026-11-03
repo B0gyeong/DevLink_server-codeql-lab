@@ -53,9 +53,12 @@ public class AgentService {
     }
 
     @Transactional(readOnly = true)
-    public List<AgentResponse> list(Long userId, Long teamId) {
+    public List<AgentResponse> list(Long userId, Long teamId, boolean ownedByMe) {
         authorization.requireTeamMember(userId, teamId);
-        return agents.findAllByTeamIdOrderByIdAsc(teamId).stream().map(AgentResponse::from).toList();
+        List<Agent> teamAgents = ownedByMe
+                ? agents.findUserAgentInTeam(teamId, userId)
+                : agents.findAllByTeamIdOrderByIdAsc(teamId);
+        return teamAgents.stream().map(AgentResponse::from).toList();
     }
 
     @Transactional(readOnly = true)

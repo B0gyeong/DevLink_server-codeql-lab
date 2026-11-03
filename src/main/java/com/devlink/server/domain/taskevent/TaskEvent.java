@@ -1,6 +1,8 @@
 package com.devlink.server.domain.taskevent;
 
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import jakarta.persistence.*;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -74,7 +76,9 @@ public class TaskEvent {
 
     @PrePersist
     private void initializeTimestamp() {
-        this.createdAt = LocalDateTime.now();
+        this.createdAt = eventType == TaskEventType.QUESTION || eventType == TaskEventType.ANSWER
+                ? LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS)
+                : LocalDateTime.now();
     }
 
     private static void requireValue(Object value, String field) {

@@ -72,6 +72,20 @@ public class Agent {
         return entity;
     }
 
+    public void updateProfile(String name, String roleDescription, String projectName) {
+        if (name != null) {
+            requireValue(name, "name");
+            this.name = name;
+        }
+        if (roleDescription != null) {
+            this.roleDescription = roleDescription.isBlank() ? null : roleDescription;
+        }
+        if (projectName != null) {
+            requireValue(projectName, "projectName");
+            this.projectName = projectName;
+        }
+    }
+
     public void markOnline(LocalDateTime seenAt) {
         requireValue(seenAt, "seenAt");
         this.status = AgentStatus.ONLINE;

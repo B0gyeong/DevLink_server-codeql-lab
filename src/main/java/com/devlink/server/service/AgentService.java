@@ -6,6 +6,7 @@ import com.devlink.server.common.ErrorCode;
 import com.devlink.server.domain.agent.Agent;
 import com.devlink.server.dto.AgentResponse;
 import com.devlink.server.dto.CreateAgentRequest;
+import com.devlink.server.dto.UpdateAgentRequest;
 import com.devlink.server.repository.AgentRepository;
 import com.devlink.server.repository.TaskRepository;
 import com.devlink.server.realtime.AgentCredentialsChangedEvent;
@@ -72,15 +73,19 @@ public class AgentService {
     }
 
     @Transactional
-    public void delete(Long userId, Long agentId) {
-        requireUser(userId);
-        requireAgentId(agentId);
-        Agent agent = agents.findByIdForUpdate(agentId)
-                .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
-        authorization.requireTeamMember(userId, agent.getTeamId());
-        if (!agent.getOwnerUserId().equals(userId)) {
-            throw new BusinessException(ErrorCode.ACCESS_DENIED);
+    public AgentResponse update(Long userId, Long agentId, UpdateAgentRequest request) {
+        Agent agent = requireOwnedAgentForUpdate(userId, agentId);
+        if ((request.name() != null && request.name().isBlank())
+                || (request.projectName() != null && request.projectName().isBlank())) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
         }
+        agent.updateProfile(request.name(), request.roleDescription(), request.projectName());
+        return saveAgent(agent);
+    }
+
+    @Transactional
+    public void delete(Long userId, Long agentId) {
+        Agent agent = requireOwnedAgentForUpdate(userId, agentId);
         // 기존 작업 조회에서 참조하는 Agent 정보 보존
         if (tasks.existsByRequesterAgentIdOrReceiverAgentId(agentId, agentId)) {
             throw new BusinessException(ErrorCode.AGENT_HAS_TASKS);
@@ -89,6 +94,18 @@ public class AgentService {
         agents.flush();
         // 삭제 커밋 후 기존 브로커 연결과 ACK 대기 정리
         events.publishEvent(new AgentCredentialsChangedEvent(agentId));
+    }
+
+    private Agent requireOwnedAgentForUpdate(Long userId, Long agentId) {
+        requireUser(userId);
+        requireAgentId(agentId);
+        Agent agent = agents.findByIdForUpdate(agentId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
+        authorization.requireTeamMember(userId, agent.getTeamId());
+        if (!agent.getOwnerUserId().equals(userId)) {
+            throw new BusinessException(ErrorCode.ACCESS_DENIED);
+        }
+        return agent;
     }
 
     private void requireUser(Long userId) {

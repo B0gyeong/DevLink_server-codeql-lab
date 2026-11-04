@@ -13,6 +13,7 @@ public record TaskListItemResponse(
         TaskStatus status,
         LocalDateTime createdAt,
         LocalDateTime startedAt,
-        LocalDateTime completedAt
+        LocalDateTime completedAt,
+        LocalDateTime lastActivityAt
 ) {
 }

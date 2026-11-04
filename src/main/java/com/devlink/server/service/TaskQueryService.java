@@ -31,6 +31,10 @@ import com.devlink.server.repository.TaskEventRepository;
 import com.devlink.server.dto.task.TaskEventResponse;
 import com.devlink.server.domain.task.TaskStatus;
 import com.devlink.server.dto.task.TaskDetailResponse;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import com.devlink.server.domain.taskevent.TaskEventType;
 
 @Service
 @RequiredArgsConstructor
@@ -101,6 +105,51 @@ public class TaskQueryService {
 	    );
 	}
 	
+	private Map<Long, LocalDateTime> findLastActivityTimes(List<Task> tasks) {
+		Map<Long, LocalDateTime> lastActivityTimes = new HashMap<>();
+
+		if (tasks.isEmpty()) {
+			return lastActivityTimes;
+		}
+
+		for (Task task : tasks) {
+			lastActivityTimes.put(task.getId(), task.getCreatedAt());
+		}
+
+		List<Long> taskIds = tasks.stream()
+				.map(Task::getId)
+				.toList();
+
+		var latestEventTimes = taskEventRepository.findLatestEventTimes(
+				taskIds,
+				List.of(
+						TaskEventType.CREATED,
+						TaskEventType.STATUS_CHANGED,
+						TaskEventType.QUESTION,
+						TaskEventType.ANSWER));
+
+		ZoneId localZone = ZoneId.systemDefault();
+
+		for (var event : latestEventTimes) {
+			LocalDateTime latestAt = event.getLatestAt();
+			// 질문·답변은 UTC로 저장되므로 로컬 시간대로 변환
+	        if (event.getEventType() == TaskEventType.QUESTION
+	                || event.getEventType() == TaskEventType.ANSWER) {
+	            latestAt = latestAt.atOffset(ZoneOffset.UTC)
+	                    .atZoneSameInstant(localZone)
+	                    .toLocalDateTime();
+	        }
+
+	        lastActivityTimes.merge(
+	                event.getTaskId(),
+	                latestAt,
+	                (current, candidate) ->
+	                        current.isAfter(candidate) ? current : candidate
+	        );
+		}
+		return lastActivityTimes;
+	}
+
 	private TaskDetailResponse toDetailResponse(
 	        Task task,
 	        Agent requesterAgent,
@@ -189,6 +238,7 @@ public class TaskQueryService {
 	    List<Task> tasks = taskPage.getContent();
 
 	    Map<Long, Agent> agentsById = findAgents(tasks);
+	    Map<Long,LocalDateTime> lastActivityTimes = findLastActivityTimes(tasks);
 
 	    List<TaskListItemResponse> items = new ArrayList<>();
 
@@ -210,7 +260,8 @@ public class TaskQueryService {
 	        items.add(toListItem(
 	                task,
 	                requesterAgent,
-	                receiverAgent
+	                receiverAgent,
+	                lastActivityTimes.get((task.getId()))
 	        ));
 	    }
 
@@ -242,7 +293,10 @@ public class TaskQueryService {
 		return agentsById;
 	}
 	
-	private TaskListItemResponse toListItem(Task task,Agent requesterAgent,Agent receiverAgent) {
+	private TaskListItemResponse toListItem(Task task,
+			Agent requesterAgent,
+			Agent receiverAgent,
+			LocalDateTime lastActivityAt) {
 		return new TaskListItemResponse(task.getId(),
 				task.getTeamId(),
 				task.getTaskSummary(),
@@ -253,7 +307,8 @@ public class TaskQueryService {
 				task.getStatus(),
 				task.getCreatedAt(),
 				task.getStartedAt(),
-				task.getCompletedAt());
+				task.getCompletedAt(),
+				lastActivityAt);
 	}
 	
 	private Page<Task> findTasks(Long teamId,AgentPrincipal agent,TaskListRequest request){

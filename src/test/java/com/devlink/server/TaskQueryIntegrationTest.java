@@ -16,6 +16,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.UUID;
 import com.devlink.server.common.AgentTokenHash;
 import com.devlink.server.domain.agent.Agent;
@@ -120,6 +121,86 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
 
         assertThat(item.has("taskSummary")).isTrue();
         assertThat(item.get("taskSummary").isNull()).isTrue();
+    }
+
+    @Test
+    void usesCreationTimeAsLastActivityWhenNoEventsExist() throws Exception {
+        JsonNode data = assertSuccess(getTasks(callerAgent.token(), ""));
+        JsonNode item = findItem(data, "sentPending");
+
+        assertThat(item.has("lastActivityAt")).isTrue();
+        assertTimestamp(item.path("lastActivityAt"), BASE_TIME);
+    }
+
+    @Test
+    void ignoresDeliveryOnlyEventsWhenChoosingLastActivity() throws Exception {
+        Long taskId = taskIds.get("sentPending");
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            for (TaskEventType type : List.of(TaskEventType.ACK_PENDING, TaskEventType.ACK_RECEIVED,
+                    TaskEventType.DELIVERY_UNKNOWN, TaskEventType.DELIVERY_NOT_SENT,
+                    TaskEventType.NOTIFY_FAILED)) {
+                createEvent(taskId, type, null, BASE_TIME.plusHours(3));
+            }
+        });
+
+        JsonNode data = assertSuccess(getTasks(callerAgent.token(), ""));
+
+        assertTimestamp(findItem(data, "sentPending").path("lastActivityAt"), BASE_TIME);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"mine", "team"})
+    void selectsLatestActivityPerTaskWithoutUsingDeliveryEvents(String scope) throws Exception {
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            Long sentTaskId = taskIds.get("sentPending");
+            createEvent(sentTaskId, TaskEventType.CREATED, null, BASE_TIME.plusSeconds(1));
+            createEvent(sentTaskId, TaskEventType.STATUS_CHANGED, "작업 수락", BASE_TIME.plusMinutes(15));
+            // 나중에 저장한 과거 기록이 최신 기록을 덮어쓰지 않아야 한다.
+            createEvent(sentTaskId, TaskEventType.STATUS_CHANGED, "이전 상태 기록", BASE_TIME.plusMinutes(5));
+            createEvent(sentTaskId, TaskEventType.NOTIFY_FAILED, "알림 실패", BASE_TIME.plusHours(4));
+            createEvent(taskIds.get("receivedPending"), TaskEventType.STATUS_CHANGED,
+                    "다른 작업의 상태 기록", BASE_TIME.plusMinutes(30));
+            createEvent(taskIds.get("otherTeamPending"), TaskEventType.STATUS_CHANGED,
+                    "다른 팀의 상태 기록", BASE_TIME.plusHours(5));
+        });
+
+        JsonNode data = assertSuccess(getTasks(callerAgent.token(), "?scope=" + scope));
+
+        assertTimestamp(findItem(data, "sentPending").path("lastActivityAt"), BASE_TIME.plusMinutes(15));
+        assertTimestamp(findItem(data, "receivedPending").path("lastActivityAt"), BASE_TIME.plusMinutes(30));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "Asia/Seoul,QUESTION,2026-01-01T00:20:00",
+            "Asia/Seoul,ANSWER,2026-01-01T00:20:00",
+            "UTC,QUESTION,2026-01-01T09:20:00",
+            "UTC,ANSWER,2026-01-01T09:20:00"
+    })
+    void convertsConversationTimeBeforeComparingLastActivity(
+            String zoneId, TaskEventType type, String utcCreatedAt) throws Exception {
+        TimeZone originalZone = TimeZone.getDefault();
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone(zoneId));
+            LocalDateTime conversationTime = LocalDateTime.parse(utcCreatedAt);
+            new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+                Long taskId = taskIds.get("sentPending");
+                createEvent(taskId, TaskEventType.STATUS_CHANGED, "작업 수락", BASE_TIME.plusMinutes(15));
+                TaskEvent question = createConversationEvent(taskId, TaskEventType.QUESTION,
+                        teammateAgent.id(), null,
+                        type == TaskEventType.QUESTION ? conversationTime : conversationTime.minusMinutes(10));
+                if (type == TaskEventType.ANSWER) {
+                    createConversationEvent(taskId, TaskEventType.ANSWER,
+                            callerAgent.id(), question.getId(), conversationTime);
+                }
+            });
+
+            JsonNode data = assertSuccess(getTasks(callerAgent.token(), ""));
+
+            assertTimestamp(findItem(data, "sentPending").path("lastActivityAt"), BASE_TIME.plusMinutes(20));
+        } finally {
+            TimeZone.setDefault(originalZone);
+        }
     }
 
     @Test
@@ -623,6 +704,15 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     private void createEvent(Long taskId, TaskEventType type, String content, LocalDateTime createdAt) {
         TaskEvent event = taskEvents.saveAndFlush(TaskEvent.of(taskId, type, content));
         jdbc.update("update task_events set created_at = ? where id = ?", Timestamp.valueOf(createdAt), event.getId());
+    }
+
+    private TaskEvent createConversationEvent(Long taskId, TaskEventType type,
+            Long authorAgentId, Long questionEventId, LocalDateTime utcCreatedAt) {
+        TaskEvent event = taskEvents.saveAndFlush(TaskEvent.of(taskId, type, "테스트 질문·답변",
+                authorAgentId, questionEventId, UUID.randomUUID().toString()));
+        jdbc.update("update task_events set created_at = ? where id = ?",
+                Timestamp.valueOf(utcCreatedAt), event.getId());
+        return event;
     }
 
     private void assertCurrentUser(HttpClient client, Long userId) throws Exception {

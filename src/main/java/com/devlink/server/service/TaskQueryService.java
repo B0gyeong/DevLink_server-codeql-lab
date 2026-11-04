@@ -1,11 +1,13 @@
 package com.devlink.server.service;
 
 import org.springframework.stereotype.Service;
+import com.devlink.server.dto.task.TaskEventListResponse;
 import com.devlink.server.dto.task.TaskFileResponse;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.dto.task.TaskListRequest;
 import com.devlink.server.common.ErrorCode;
 import com.devlink.server.repository.TeamRepository;
+import com.devlink.server.domain.taskevent.TaskEvent;
 import com.devlink.server.repository.TeamMemberRepository;
 import lombok.RequiredArgsConstructor;
 import com.devlink.server.repository.AgentRepository;
@@ -25,12 +27,16 @@ import java.util.HashMap;
 import java.util.HashSet;
 import com.devlink.server.dto.task.TaskListResponse;
 import java.util.ArrayList;
+import java.util.Collections;
+
 import org.springframework.transaction.annotation.Transactional;
 import com.devlink.server.repository.TaskFileRepository;
 import com.devlink.server.repository.TaskEventRepository;
 import com.devlink.server.dto.task.TaskEventResponse;
 import com.devlink.server.domain.task.TaskStatus;
 import com.devlink.server.dto.task.TaskDetailResponse;
+import com.devlink.server.dto.task.TaskEventListRequest;
+
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -219,10 +225,58 @@ public class TaskQueryService {
 	            .toList();
 	}
 	
+	@Transactional(readOnly = true)
+	public TaskEventListResponse getTaskEvents(
+			Long taskId,
+			AgentPrincipal agent,
+			TaskEventListRequest request) {
+		
+		validateAgent(agent);
+		
+		Task task = findTask(taskId);
+		validateTeam(task.getTeamId(),agent);
+		
+		int limit = request.limit();
+		Pageable pageable = PageRequest.of(0, limit+1);
+		
+		List<TaskEvent> fetched;
+		
+		if(request.beforeSequence() == null) {
+			fetched = taskEventRepository.findLatestEvents(taskId, pageable);
+		}else {
+			Long beforeSequence;
+			try {
+				beforeSequence = Long.valueOf(request.beforeSequence());
+			}catch(NumberFormatException e) {
+				throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+			}
+			fetched = taskEventRepository.findEventsBefore(taskId, beforeSequence, pageable);
+		}
+		boolean hasNext = fetched.size()>limit;
+		
+		List<TaskEvent> selected = new ArrayList<>(
+				fetched.subList(0, Math.min(limit, fetched.size())));
+		
+		Collections.reverse(selected);
+		
+		String nextBeforeSequence = hasNext?selected.getFirst().getSequence().toString():null;
+
+		return new TaskEventListResponse(
+				taskId,
+				toEventResponses(selected),
+				nextBeforeSequence,
+				hasNext);
+	}
+	
 	private List<TaskEventResponse> findTaskEvents(Long taskId) {
 		
 		var events = taskEventRepository.findByTaskIdOrderBySequenceAsc(taskId);
 		
+		return toEventResponses(events);
+		
+	}
+	
+	private List<TaskEventResponse> toEventResponses(List<TaskEvent> events){
 		if(events.isEmpty()) {
 			return List.of();
 		}

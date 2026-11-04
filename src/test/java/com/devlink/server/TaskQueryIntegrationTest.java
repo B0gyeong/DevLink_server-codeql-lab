@@ -653,6 +653,204 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
+    void paginatesEventsWithoutDuplicatesWhenNewEventsArrive() throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            for (int i = 1; i <= 5; i++) {
+                createEvent(taskId, TaskEventType.STATUS_CHANGED, "기록 " + i,
+                        BASE_TIME.plusSeconds(6 - i));
+            }
+            createEvent(taskIds.get("receivedCompleted"), TaskEventType.CREATED, "다른 작업", BASE_TIME);
+            createEvent(taskIds.get("otherTeamPending"), TaskEventType.CREATED, "다른 팀", BASE_TIME);
+        });
+        Map<String, Object> taskBefore = jdbc.queryForMap("select * from tasks where id = ?", taskId);
+
+        JsonNode first = assertSuccess(get(eventsPath(taskId) + "?limit=2", callerAgent.token()));
+        assertEventPage(first, taskId, "4", true, "4", "5");
+
+        // 최신 기록이 추가되어도 이전 페이지의 경계가 밀리지 않아야 한다.
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx ->
+                createEvent(taskId, TaskEventType.STATUS_CHANGED, "새 기록", BASE_TIME.plusMinutes(1)));
+        List<Map<String, Object>> eventsBefore = jdbc.queryForList(
+                "select * from task_events where task_id = ? order by sequence", taskId);
+
+        JsonNode second = assertSuccess(get(eventsPath(taskId) + "?limit=2&beforeSequence="
+                + first.path("nextBeforeSequence").asText(), callerAgent.token()));
+        assertEventPage(second, taskId, "2", true, "2", "3");
+        JsonNode last = assertSuccess(get(eventsPath(taskId) + "?limit=2&beforeSequence="
+                + second.path("nextBeforeSequence").asText(), callerAgent.token()));
+        assertEventPage(last, taskId, null, false, "1");
+        JsonNode empty = assertSuccess(get(eventsPath(taskId) + "?limit=2&beforeSequence=1", callerAgent.token()));
+        assertEventPage(empty, taskId, null, false);
+
+        assertThat(jdbc.queryForMap("select * from tasks where id = ?", taskId)).isEqualTo(taskBefore);
+        assertThat(jdbc.queryForList("select * from task_events where task_id = ? order by sequence", taskId))
+                .isEqualTo(eventsBefore);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"default|50", "1|1", "100|100"})
+    void appliesEventPageDefaultAndLimitBoundaries(String limit, int expectedSize) throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            for (int i = 1; i <= 101; i++) {
+                createEvent(taskId, TaskEventType.ACK_RECEIVED, "전달 기록 " + i, BASE_TIME);
+            }
+        });
+
+        String query = "default".equals(limit) ? "" : "?limit=" + limit;
+        JsonNode data = assertSuccess(get(eventsPath(taskId) + query, callerAgent.token()));
+
+        assertThat(data.path("items").size()).isEqualTo(expectedSize);
+        assertThat(data.path("hasNext").asBoolean()).isTrue();
+        assertNullableText(data.path("nextBeforeSequence"), Integer.toString(102 - expectedSize));
+        for (int i = 0; i < expectedSize; i++) {
+            JsonNode item = data.path("items").get(i);
+            assertDetailEvent(item, TaskEventType.ACK_RECEIVED, "전달 기록 " + (102 - expectedSize + i), BASE_TIME);
+            assertThat(item.path("sequence").asText()).isEqualTo(Integer.toString(102 - expectedSize + i));
+            assertThat(item.path("authorAgent").isNull()).isTrue();
+            assertThat(item.path("questionEventId").isNull()).isTrue();
+        }
+    }
+
+    @Test
+    void returnsSameEventFieldsAsDetailWhenQuestionIsOnAnotherPage() throws Exception {
+        Long taskId = taskIds.get("sentInProgress");
+        List<TaskEvent> stored = new ArrayList<>();
+        String body = "첫 줄\n```java\n  return true;\n```\n<script>alert('text')</script> 😀";
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            TaskEvent question = createConversationEvent(taskId, TaskEventType.QUESTION,
+                    teammateAgent.id(), null, BASE_TIME);
+            stored.add(question);
+            stored.add(createConversationEvent(taskId, TaskEventType.ANSWER,
+                    callerAgent.id(), question.getId(), BASE_TIME));
+            stored.add(createConversationEvent(taskId, TaskEventType.ANSWER,
+                    teammateAgent.id(), question.getId(), BASE_TIME));
+            jdbc.update("update task_events set content = ? where id = ?", body, stored.get(1).getId());
+        });
+
+        JsonNode detail = assertSuccess(get(detailPath(taskId), callerAgent.token())).path("events");
+        // 같은 팀의 작업 비참여 Agent도 읽을 수 있다.
+        JsonNode first = assertSuccess(get(eventsPath(taskId) + "?limit=2", emptyAgent.token()));
+        assertEventPage(first, taskId, "2", true, "2", "3");
+        assertThat(first.path("items").get(0)).isEqualTo(detail.get(1));
+        assertThat(first.path("items").get(1)).isEqualTo(detail.get(2));
+        assertDetailAgent(first.path("items").get(0).path("authorAgent"), callerAgent);
+        assertDetailAgent(first.path("items").get(1).path("authorAgent"), teammateAgent);
+        assertThat(first.path("items").get(0).path("message").asText()).isEqualTo(body);
+        for (JsonNode item : first.path("items")) {
+            assertNullableText(item.path("questionEventId"), stored.get(0).getId().toString());
+        }
+
+        JsonNode last = assertSuccess(get(eventsPath(taskId) + "?limit=2&beforeSequence=2", callerAgent.token()));
+        assertEventPage(last, taskId, null, false, "1");
+        assertThat(last.path("items").get(0)).isEqualTo(detail.get(0));
+        // 전체 이벤트 수가 limit와 같으면 다음 페이지가 없어야 한다.
+        JsonNode exact = assertSuccess(get(eventsPath(taskId) + "?limit=3", callerAgent.token()));
+        assertEventPage(exact, taskId, null, false, "1", "2", "3");
+        assertThat(exact.path("items")).isEqualTo(detail);
+    }
+
+    @Test
+    void acceptsMissingSequenceBoundaryAndGapsWithoutRenumbering() throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            for (int i = 1; i <= 3; i++) {
+                createEvent(taskId, TaskEventType.CREATED, null, BASE_TIME);
+            }
+            jdbc.update("delete from task_events where task_id = ? and sequence = 2", taskId);
+        });
+
+        JsonNode data = assertSuccess(get(eventsPath(taskId) + "?beforeSequence=2", callerAgent.token()));
+        assertEventPage(data, taskId, null, false, "1");
+        JsonNode all = assertSuccess(get(eventsPath(taskId) + "?beforeSequence=9223372036854775807", callerAgent.token()));
+        assertEventPage(all, taskId, null, false, "1", "3");
+        assertThat(all.path("items").get(0).path("message").isNull()).isTrue();
+    }
+
+    @Test
+    void returnsEmptyEventPageForExistingTaskWithoutHistory() throws Exception {
+        Long taskId = taskIds.get("sentPending");
+        JsonNode data = assertSuccess(get(eventsPath(taskId), callerAgent.token()));
+        assertEventPage(data, taskId, null, false);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"beforeSequence=0", "beforeSequence=-1", "beforeSequence=01",
+            "beforeSequence=abc", "beforeSequence=1.5", "beforeSequence=",
+            "beforeSequence=9223372036854775808", "beforeSequence=99999999999999999999",
+            "limit=0", "limit=-1", "limit=101", "limit=abc", "limit=1.5", "limit=2147483648"})
+    void rejectsInvalidEventPageParameters(String query) throws Exception {
+        assertError(get(eventsPath(taskIds.get("sentCompleted")) + "?" + query, callerAgent.token()),
+                400, "VALIDATION_FAILED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "-1", "abc", "9223372036854775808"})
+    void rejectsInvalidEventPageTaskId(String taskId) throws Exception {
+        assertError(get("/api/v1/tasks/" + taskId + "/events", callerAgent.token()), 400, "VALIDATION_FAILED");
+    }
+
+    @Test
+    void protectsEventPageWithAgentAuthenticationAndTeamAuthorization() throws Exception {
+        String path = eventsPath(taskIds.get("sentCompleted"));
+        assertError(get(path, null), 401, "AUTHENTICATION_REQUIRED");
+        assertError(get(path, "unknown-token"), 401, "AUTHENTICATION_REQUIRED");
+        // 이벤트가 없어도 접근 권한 검사를 생략하지 않는다.
+        assertError(get(path, otherTeamAgent.token()), 403, "ACCESS_DENIED");
+        assertError(get(eventsPath(taskIds.get("otherTeamPending")), callerAgent.token()), 403, "ACCESS_DENIED");
+        assertError(get(eventsPath(Long.MAX_VALUE), callerAgent.token()), 404, "RESOURCE_NOT_FOUND");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"revoked", "leftTeam"})
+    void rejectsEventPageWhenAgentCredentialsAreNoLongerValid(String condition) throws Exception {
+        if ("revoked".equals(condition)) {
+            jdbc.update("update agents set connection_token_hash = null where id = ?", callerAgent.id());
+        } else {
+            jdbc.update("delete from team_members where team_id = ? and user_id = ?", team.getId(), owner.getId());
+        }
+        assertError(get(eventsPath(taskIds.get("sentCompleted")), callerAgent.token()),
+                401, "AUTHENTICATION_REQUIRED");
+    }
+
+    @Test
+    void doesNotUseUserSessionAsEventPageAgentIdentity() throws Exception {
+        try (HttpClient client = HttpClient.newBuilder()
+                .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL)).build()) {
+            loginAs(client, outsider);
+            String path = eventsPath(taskIds.get("sentCompleted"));
+            assertError(client.send(request(path).GET().build(), HttpResponse.BodyHandlers.ofString()),
+                    401, "AUTHENTICATION_REQUIRED");
+            JsonNode data = assertSuccess(client.send(request(path)
+                    .header("Authorization", "Bearer " + callerAgent.token()).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()));
+            assertThat(data.path("taskId").asLong()).isEqualTo(taskIds.get("sentCompleted"));
+            assertCurrentUser(client, outsider.getId());
+        }
+    }
+
+    private String eventsPath(Long taskId) {
+        return detailPath(taskId) + "/events";
+    }
+
+    private void assertEventPage(JsonNode data, Long taskId, String cursor, boolean hasNext, String... sequences) {
+        assertThat(data.path("taskId").asLong()).isEqualTo(taskId);
+        assertThat(data.path("items").isArray()).isTrue();
+        List<String> actual = new ArrayList<>();
+        data.path("items").forEach(item -> {
+            assertThat(item.path("sequence").isTextual()).isTrue();
+            actual.add(item.path("sequence").asText());
+        });
+        assertThat(actual).containsExactly(sequences);
+        assertNullableText(data.path("nextBeforeSequence"), cursor);
+        assertThat(data.path("hasNext").isBoolean()).isTrue();
+        assertThat(data.path("hasNext").asBoolean()).isEqualTo(hasNext);
+        assertThat(data.has("prompt")).isFalse();
+        assertThat(data.has("taskFiles")).isFalse();
+    }
+
+    @Test
     void rejectsDetailWithoutAgentToken() throws Exception {
         assertError(get(detailPath(taskIds.get("sentCompleted")), null), 401, "AUTHENTICATION_REQUIRED");
     }

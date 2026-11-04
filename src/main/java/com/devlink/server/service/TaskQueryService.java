@@ -168,12 +168,21 @@ public class TaskQueryService {
 	    String rejectionReason = status == TaskStatus.REJECTED
 	            ? task.getResultText() : null;
 
+	    String teamName = teamRepository.findById(task.getTeamId())
+	            .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND))
+	            .getName();
+
 	    boolean partiallyModified = status == TaskStatus.FAILED
 	            && task.isPartiallyModified();
+
+	    LocalDateTime lastActivityAt = findLastActivityTimes(List.of(task))
+	            .get(task.getId());
 
 	    return new TaskDetailResponse(
 	            task.getId(),
 	            task.getTeamId(),
+	            teamName,
+	            task.getTaskSummary(),
 	            new TaskAgentResponse(
 	                    requesterAgent.getId(),
 	                    requesterAgent.getName()
@@ -183,7 +192,7 @@ public class TaskQueryService {
 	                    receiverAgent.getName()
 	            ),
 	            task.getPrompt(),
-	            status,
+	            task.getStatus(),
 	            task.getVersion(),
 	            resultText,
 	            failureReason,
@@ -193,7 +202,8 @@ public class TaskQueryService {
 	            events,
 	            task.getCreatedAt(),
 	            task.getStartedAt(),
-	            task.getCompletedAt()
+	            task.getCompletedAt(),
+	            lastActivityAt
 	    );
 	}
 	
@@ -210,15 +220,51 @@ public class TaskQueryService {
 	}
 	
 	private List<TaskEventResponse> findTaskEvents(Long taskId) {
-	    return taskEventRepository
-	            .findByTaskIdOrderByCreatedAtAsc(taskId)
-	            .stream()
-	            .map(event -> new TaskEventResponse(
-	                    event.getEventType(),
-	                    event.getContent(),
-	                    event.getCreatedAt()
-	            ))
-	            .toList();
+		
+		var events = taskEventRepository.findByTaskIdOrderBySequenceAsc(taskId);
+		
+		if(events.isEmpty()) {
+			return List.of();
+		}
+		//작성자가 있는 이벤트에서 에이전트 ID를 중복 없이 수집
+		Set<Long> authorAgentIds = new HashSet<>();
+		
+		for(var event: events) {
+			if(event.getAuthorAgentId() != null) {
+				authorAgentIds.add(event.getAuthorAgentId());
+			}
+		}
+		
+		Map<Long,Agent> authorsById = new HashMap<>();
+		
+		if(!authorAgentIds.isEmpty()) {
+			for(Agent author:agentRepository.findAllById(authorAgentIds)) {
+				authorsById.put(author.getId(), author);
+			}
+		}
+		
+		return events.stream()
+				.map(event ->{
+					Long authorAgentId = event.getAuthorAgentId();
+					
+					Agent author = authorAgentId == null?null:authorsById.get(authorAgentId);
+					
+					TaskAgentResponse authorAgent = author == null?null
+							:new TaskAgentResponse(author.getId(),author.getName());
+					
+					Long questionEventId = event.getQuestionEventId();
+					
+					return new TaskEventResponse(
+							event.getId().toString(),
+							event.getSequence().toString(),
+							event.getEventType(),
+							authorAgent,
+							event.getContent(),
+							questionEventId == null?null
+									: questionEventId.toString(),
+							event.getCreatedAt());
+					
+				}).toList();
 	}
 	
 	private Task findTask(Long taskId) {

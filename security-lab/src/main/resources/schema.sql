@@ -1,0 +1,1 @@
+CREATE TABLE products (name VARCHAR(100) PRIMARY KEY);

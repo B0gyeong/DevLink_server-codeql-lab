@@ -220,15 +220,51 @@ public class TaskQueryService {
 	}
 	
 	private List<TaskEventResponse> findTaskEvents(Long taskId) {
-	    return taskEventRepository
-	            .findByTaskIdOrderByCreatedAtAsc(taskId)
-	            .stream()
-	            .map(event -> new TaskEventResponse(
-	                    event.getEventType(),
-	                    event.getContent(),
-	                    event.getCreatedAt()
-	            ))
-	            .toList();
+		
+		var events = taskEventRepository.findByTaskIdOrderBySequenceAsc(taskId);
+		
+		if(events.isEmpty()) {
+			return List.of();
+		}
+		//작성자가 있는 이벤트에서 에이전트 ID를 중복 없이 수집
+		Set<Long> authorAgentIds = new HashSet<>();
+		
+		for(var event: events) {
+			if(event.getAuthorAgentId() != null) {
+				authorAgentIds.add(event.getAuthorAgentId());
+			}
+		}
+		
+		Map<Long,Agent> authorsById = new HashMap<>();
+		
+		if(!authorAgentIds.isEmpty()) {
+			for(Agent author:agentRepository.findAllById(authorAgentIds)) {
+				authorsById.put(author.getId(), author);
+			}
+		}
+		
+		return events.stream()
+				.map(event ->{
+					Long authorAgentId = event.getAuthorAgentId();
+					
+					Agent author = authorAgentId == null?null:authorsById.get(authorAgentId);
+					
+					TaskAgentResponse authorAgent = author == null?null
+							:new TaskAgentResponse(author.getId(),author.getName());
+					
+					Long questionEventId = event.getQuestionEventId();
+					
+					return new TaskEventResponse(
+							event.getId().toString(),
+							event.getSequence().toString(),
+							event.getEventType(),
+							authorAgent,
+							event.getContent(),
+							questionEventId == null?null
+									: questionEventId.toString(),
+							event.getCreatedAt());
+					
+				}).toList();
 	}
 	
 	private Task findTask(Long taskId) {

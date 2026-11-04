@@ -590,11 +590,11 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void returnsOnlyRequestedTaskEventsInChronologicalOrder() throws Exception {
+    void returnsOnlyRequestedTaskEventsInSequenceOrder() throws Exception {
         Long taskId = taskIds.get("sentCompleted");
         LocalDateTime createdAt = BASE_TIME.plusMinutes(2);
         new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
-            // 저장 순서와 발생 시각을 다르게 만들어 DB 정렬을 확인한다.
+            // 기록 시각이 역전되어도 sequence 순서를 유지해야 한다.
             createEvent(taskId, TaskEventType.STATUS_CHANGED, "IN_PROGRESS → COMPLETED", createdAt.plusSeconds(20));
             createEvent(taskId, TaskEventType.CREATED, "작업 생성", createdAt);
             createEvent(taskId, TaskEventType.ACK_RECEIVED, null, createdAt.plusSeconds(5));
@@ -607,10 +607,49 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
 
         assertThat(events.isArray()).isTrue();
         assertThat(events.size()).isEqualTo(4);
-        assertDetailEvent(events.get(0), TaskEventType.CREATED, "작업 생성", createdAt);
-        assertDetailEvent(events.get(1), TaskEventType.ACK_RECEIVED, null, createdAt.plusSeconds(5));
-        assertDetailEvent(events.get(2), TaskEventType.PROGRESS, "진행률 50%", createdAt.plusSeconds(15));
-        assertDetailEvent(events.get(3), TaskEventType.STATUS_CHANGED, "IN_PROGRESS → COMPLETED", createdAt.plusSeconds(20));
+        assertDetailEvent(events.get(0), TaskEventType.STATUS_CHANGED, "IN_PROGRESS → COMPLETED", createdAt.plusSeconds(20));
+        assertDetailEvent(events.get(1), TaskEventType.CREATED, "작업 생성", createdAt);
+        assertDetailEvent(events.get(2), TaskEventType.ACK_RECEIVED, null, createdAt.plusSeconds(5));
+        assertDetailEvent(events.get(3), TaskEventType.PROGRESS, "진행률 50%", createdAt.plusSeconds(15));
+        for (int i = 0; i < events.size(); i++) {
+            assertThat(events.get(i).path("sequence").asText()).isEqualTo(Integer.toString(i + 1));
+            assertThat(events.get(i).path("authorAgent").isNull()).isTrue();
+            assertThat(events.get(i).path("questionEventId").isNull()).isTrue();
+        }
+    }
+
+    @Test
+    void returnsConversationAuthorsAndQuestionReferencesWithStableSequence() throws Exception {
+        Long taskId = taskIds.get("sentInProgress");
+        LocalDateTime sameTime = LocalDateTime.of(2026, 1, 1, 0, 20);
+        List<TaskEvent> stored = new ArrayList<>();
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            TaskEvent question = createConversationEvent(taskId, TaskEventType.QUESTION,
+                    teammateAgent.id(), null, sameTime);
+            stored.add(question);
+            stored.add(createConversationEvent(taskId, TaskEventType.ANSWER,
+                    callerAgent.id(), question.getId(), sameTime));
+            stored.add(createConversationEvent(taskId, TaskEventType.ANSWER,
+                    teammateAgent.id(), question.getId(), sameTime));
+        });
+
+        JsonNode events = assertSuccess(get(detailPath(taskId), callerAgent.token())).path("events");
+
+        assertThat(events.isArray()).isTrue();
+        assertThat(events.size()).isEqualTo(3);
+        for (int i = 0; i < stored.size(); i++) {
+            TaskEvent expected = stored.get(i);
+            JsonNode actual = events.get(i);
+            assertDetailEvent(actual, expected.getEventType(), "테스트 질문·답변", sameTime);
+            assertThat(actual.path("eventId").asText()).isEqualTo(expected.getId().toString());
+            assertThat(actual.path("sequence").asText()).isEqualTo(expected.getSequence().toString());
+            assertDetailAgent(actual.path("authorAgent"), i == 1 ? callerAgent : teammateAgent);
+            assertNullableText(actual.path("questionEventId"),
+                    i == 0 ? null : stored.get(0).getId().toString());
+        }
+        // 같은 시각의 이벤트도 반복 조회 시 순서와 내용이 유지되어야 한다.
+        JsonNode repeated = assertSuccess(get(detailPath(taskId), callerAgent.token())).path("events");
+        assertThat(repeated).isEqualTo(events);
     }
 
     @Test
@@ -734,6 +773,10 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     }
 
     private void assertDetailEvent(JsonNode event, TaskEventType type, String message, LocalDateTime createdAt) {
+        assertThat(event.path("eventId").isTextual()).isTrue();
+        assertThat(event.path("eventId").asText()).matches("[1-9][0-9]*");
+        assertThat(event.path("sequence").isTextual()).isTrue();
+        assertThat(event.path("sequence").asText()).matches("[1-9][0-9]*");
         assertThat(event.path("eventType").asText()).isEqualTo(type.name());
         assertNullableText(event.path("message"), message);
         assertThat(event.has("content")).isFalse();

@@ -24,9 +24,9 @@ class ProductControllerTest {
     }
 
     @Test
-    void handlesSqlMetacharactersInName() throws Exception {
+    void treatsSqlMetacharactersAsPartOfTheName() throws Exception {
         mvc.perform(get("/products").param("name", "' OR '1'='1"))
             .andExpect(status().isOk())
-            .andExpect(content().json("[\"Notebook\",\"Pencil\"]"));
+            .andExpect(content().json("[]"));
     }
 }

@@ -16,7 +16,7 @@ class ProductController {
 
     @GetMapping("/products")
     List<String> findByName(@RequestParam("name") String name) {
-        String sql = "SELECT name FROM products WHERE name = '" + name + "' ORDER BY name";
-        return jdbc.queryForList(sql, String.class);
+        String sql = "SELECT name FROM products WHERE name = ? ORDER BY name";
+        return jdbc.queryForList(sql, String.class, name);
     }
 }

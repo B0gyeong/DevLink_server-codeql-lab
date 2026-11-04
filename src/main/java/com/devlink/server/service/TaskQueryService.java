@@ -168,12 +168,21 @@ public class TaskQueryService {
 	    String rejectionReason = status == TaskStatus.REJECTED
 	            ? task.getResultText() : null;
 
+	    String teamName = teamRepository.findById(task.getTeamId())
+	            .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND))
+	            .getName();
+
 	    boolean partiallyModified = status == TaskStatus.FAILED
 	            && task.isPartiallyModified();
+
+	    LocalDateTime lastActivityAt = findLastActivityTimes(List.of(task))
+	            .get(task.getId());
 
 	    return new TaskDetailResponse(
 	            task.getId(),
 	            task.getTeamId(),
+	            teamName,
+	            task.getTaskSummary(),
 	            new TaskAgentResponse(
 	                    requesterAgent.getId(),
 	                    requesterAgent.getName()
@@ -183,7 +192,7 @@ public class TaskQueryService {
 	                    receiverAgent.getName()
 	            ),
 	            task.getPrompt(),
-	            status,
+	            task.getStatus(),
 	            task.getVersion(),
 	            resultText,
 	            failureReason,
@@ -193,7 +202,8 @@ public class TaskQueryService {
 	            events,
 	            task.getCreatedAt(),
 	            task.getStartedAt(),
-	            task.getCompletedAt()
+	            task.getCompletedAt(),
+	            lastActivityAt
 	    );
 	}
 	

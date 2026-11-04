@@ -124,12 +124,38 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
+    void returnsStoredTaskSummaryInDetailWithoutReplacingPromptOrResult() throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        String summary = "상세 조회용 작업 요약\n검증 항목 확인 😀";
+        jdbc.update("update tasks set task_summary = ? where id = ?", summary, taskId);
+
+        JsonNode data = assertSuccess(get(detailPath(taskId), callerAgent.token()));
+
+        assertThat(data.has("taskSummary")).isTrue();
+        assertThat(data.get("taskSummary").asText()).isEqualTo(summary);
+        assertThat(data.path("prompt").asText()).isEqualTo("목록 조회 테스트: sentCompleted");
+        assertThat(data.path("resultText").asText()).isEqualTo("테스트 작업 완료");
+    }
+
+    @Test
+    void returnsExplicitNullInDetailWhenTaskHasNoSummary() throws Exception {
+        JsonNode data = assertSuccess(get(detailPath(taskIds.get("sentCompleted")), callerAgent.token()));
+
+        assertThat(data.has("taskSummary")).isTrue();
+        assertThat(data.get("taskSummary").isNull()).isTrue();
+        assertThat(data.path("resultText").asText()).isEqualTo("테스트 작업 완료");
+    }
+
+    @Test
     void usesCreationTimeAsLastActivityWhenNoEventsExist() throws Exception {
         JsonNode data = assertSuccess(getTasks(callerAgent.token(), ""));
         JsonNode item = findItem(data, "sentPending");
 
         assertThat(item.has("lastActivityAt")).isTrue();
         assertTimestamp(item.path("lastActivityAt"), BASE_TIME);
+
+        JsonNode detail = assertSuccess(get(detailPath(taskIds.get("sentPending")), callerAgent.token()));
+        assertTimestamp(detail.path("lastActivityAt"), BASE_TIME);
     }
 
     @Test
@@ -146,6 +172,9 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
         JsonNode data = assertSuccess(getTasks(callerAgent.token(), ""));
 
         assertTimestamp(findItem(data, "sentPending").path("lastActivityAt"), BASE_TIME);
+
+        JsonNode detail = assertSuccess(get(detailPath(taskId), callerAgent.token()));
+        assertTimestamp(detail.path("lastActivityAt"), BASE_TIME);
     }
 
     @ParameterizedTest
@@ -168,6 +197,11 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
 
         assertTimestamp(findItem(data, "sentPending").path("lastActivityAt"), BASE_TIME.plusMinutes(15));
         assertTimestamp(findItem(data, "receivedPending").path("lastActivityAt"), BASE_TIME.plusMinutes(30));
+
+        JsonNode sentDetail = assertSuccess(get(detailPath(taskIds.get("sentPending")), callerAgent.token()));
+        JsonNode receivedDetail = assertSuccess(get(detailPath(taskIds.get("receivedPending")), callerAgent.token()));
+        assertTimestamp(sentDetail.path("lastActivityAt"), BASE_TIME.plusMinutes(15));
+        assertTimestamp(receivedDetail.path("lastActivityAt"), BASE_TIME.plusMinutes(30));
     }
 
     @ParameterizedTest
@@ -198,6 +232,9 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
             JsonNode data = assertSuccess(getTasks(callerAgent.token(), ""));
 
             assertTimestamp(findItem(data, "sentPending").path("lastActivityAt"), BASE_TIME.plusMinutes(20));
+
+            JsonNode detail = assertSuccess(get(detailPath(taskIds.get("sentPending")), callerAgent.token()));
+            assertTimestamp(detail.path("lastActivityAt"), BASE_TIME.plusMinutes(20));
         } finally {
             TimeZone.setDefault(originalZone);
         }
@@ -452,6 +489,7 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
             boolean hasStarted, boolean hasCompleted) throws Exception {
         JsonNode data = assertSuccess(get(detailPath(taskIds.get(label)), callerAgent.token()));
 
+        assertThat(data.path("teamName").asText()).isEqualTo(team.getName());
         assertThat(data.path("status").asText()).isEqualTo(status);
         assertNullableText(data.path("resultText"),
                 "COMPLETED".equals(status) ? "테스트 작업 완료" : null);
@@ -465,6 +503,7 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
         assertTimestamp(data.path("createdAt"), createdAt);
         assertTimestamp(data.path("startedAt"), hasStarted ? createdAt.plusSeconds(10) : null);
         assertTimestamp(data.path("completedAt"), hasCompleted ? createdAt.plusSeconds(20) : null);
+        assertTimestamp(data.path("lastActivityAt"), createdAt);
         assertEmptyArray(data.path("taskFiles"));
         assertEmptyArray(data.path("events"));
     }

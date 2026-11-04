@@ -1,6 +1,8 @@
 package com.devlink.server.controller;
 
 import com.devlink.server.common.ApiResponse;
+import com.devlink.server.dto.task.TaskEventListRequest;
+import com.devlink.server.dto.task.TaskEventListResponse;
 import com.devlink.server.dto.task.TaskDetailResponse;
 import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.dto.task.TaskListRequest;
@@ -54,6 +56,16 @@ public class TaskQueryController {
         return ResponseEntity.ok(
                 ApiResponse.success(response)
         );
+    }
+    
+    @GetMapping("/tasks/{taskId}/events")
+    public ResponseEntity<ApiResponse<TaskEventListResponse>> getTaskEvents(
+    		@PathVariable @Positive Long taskId,
+    		@AuthenticationPrincipal AgentPrincipal agent,
+    		@Valid @ModelAttribute TaskEventListRequest request){
+    	TaskEventListResponse response = taskQueryService.getTaskEvents(taskId, agent, request);
+    	
+    	return ResponseEntity.ok(ApiResponse.success(response));
     }
     
     

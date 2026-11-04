@@ -1,0 +1,41 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    if: github.repository == 'B0gyeong/DevLink_server-codeql-lab'
+    name: Analyze Java
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          build-mode: manual
+      - name: Compile DevLink and test the lab
+        run: |
+          ./gradlew clean compileJava --no-daemon
+          if [ -d security-lab ]; then
+            ./gradlew -p security-lab clean test --no-daemon
+          fi
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:java-kotlin

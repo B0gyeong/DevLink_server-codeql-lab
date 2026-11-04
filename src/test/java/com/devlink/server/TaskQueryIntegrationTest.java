@@ -84,6 +84,208 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     private int taskSequence;
 
     @Test
+    void webListAllowsTeamMemberWithoutAgentsAndMatchesCommonTeamResponse() throws Exception {
+        User viewer = new TransactionTemplate(transactionManager).execute(tx -> {
+            User user = createUser("Agent 없는 조회 사용자", passwordEncoder.encode(TEST_PASSWORD));
+            members.save(TeamMember.create(team.getId(), user.getId(), MemberRole.MEMBER));
+            return user;
+        });
+        String summary = "작업 요약\n  코드 확인 😀";
+        jdbc.update("update tasks set task_summary = ? where id = ?", summary, taskIds.get("sentCompleted"));
+
+        try (HttpClient client = loggedInClient(viewer)) {
+            JsonNode data = assertSuccess(webGet(client, team.getId(), ""));
+            assertItems(data, "sameOwnerReceived", "sameOwnerSent", "selfPending", "receivedCompleted",
+                    "receivedPending", "sentRejected", "sentFailed", "sentCompleted", "sentInProgress", "sentPending");
+            assertPage(data, 0, 20, 10, 1, false);
+            assertThat(data).isEqualTo(assertSuccess(getTasks(callerAgent.token(), "?scope=team")));
+            assertNullableText(findItem(data, "sentCompleted").path("taskSummary"), summary);
+            assertNullableText(findItem(data, "sentPending").path("taskSummary"), null);
+            for (JsonNode item : data.path("items")) {
+                assertThat(item.path("teamId").asLong()).isEqualTo(team.getId());
+                assertThat(item.has("summaryPreview")).isFalse();
+                for (String excluded : List.of("prompt", "events", "resultText", "taskFiles")) {
+                    assertThat(item.has(excluded)).isFalse();
+                }
+            }
+            assertCurrentUser(client, viewer.getId());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "PENDING|sameOwnerSent,selfPending,receivedPending,sentPending",
+            "IN_PROGRESS|sentInProgress",
+            "COMPLETED|receivedCompleted,sentCompleted",
+            "FAILED|sameOwnerReceived,sentFailed",
+            "REJECTED|sentRejected"
+    })
+    void webListFiltersEveryTaskStatus(String status, String labels) throws Exception {
+        try (HttpClient client = loggedInClient(teammate)) {
+            JsonNode data = assertSuccess(webGet(client, team.getId(), "?status=" + status));
+            String[] expected = labels.split(",");
+            assertItems(data, expected);
+            assertPage(data, 0, 20, expected.length, 1, false);
+            for (JsonNode item : data.path("items")) {
+                assertThat(item.path("status").asText()).isEqualTo(status);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "0|true|sameOwnerReceived,sameOwnerSent,selfPending,receivedCompleted",
+            "1|true|receivedPending,sentRejected,sentFailed,sentCompleted",
+            "2|false|sentInProgress,sentPending"
+    })
+    void webListPaginatesWithStableTotals(int page, boolean hasNext, String labels) throws Exception {
+        try (HttpClient client = loggedInClient(owner)) {
+            JsonNode data = assertSuccess(webGet(client, team.getId(), "?size=4&page=" + page));
+            assertItems(data, labels.split(","));
+            assertPage(data, page, 4, 10, 3, hasNext);
+            JsonNode beyond = assertSuccess(webGet(client, team.getId(), "?size=4&page=3"));
+            assertItems(beyond);
+            assertPage(beyond, 3, 4, 10, 3, false);
+        }
+    }
+
+    @Test
+    void webListCombinesStatusAndPaginationAndAcceptsSizeBoundaries() throws Exception {
+        try (HttpClient client = loggedInClient(owner)) {
+            JsonNode filtered = assertSuccess(webGet(client, team.getId(), "?status=FAILED&size=1&page=1"));
+            assertItems(filtered, "sentFailed");
+            assertPage(filtered, 1, 1, 2, 2, false);
+            JsonNode maximum = assertSuccess(webGet(client, team.getId(), "?size=100"));
+            assertPage(maximum, 0, 100, 10, 1, false);
+        }
+    }
+
+    @Test
+    void webListSortsEqualCreationTimesByIdInsteadOfRecentActivity() throws Exception {
+        jdbc.update("update tasks set created_at = ? where id = ?",
+                Timestamp.valueOf(BASE_TIME.plusMinutes(9)), taskIds.get("sentPending"));
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx ->
+                createEvent(taskIds.get("sentInProgress"), TaskEventType.STATUS_CHANGED,
+                        "최근 활동", BASE_TIME.plusHours(1)));
+        try (HttpClient client = loggedInClient(owner)) {
+            assertItems(assertSuccess(webGet(client, team.getId(), "?size=1&page=0")), "sameOwnerReceived");
+            assertItems(assertSuccess(webGet(client, team.getId(), "?size=1&page=1")), "sentPending");
+        }
+    }
+
+    @Test
+    void webListChecksAuthorizationEvenForTeamWithoutTasks() throws Exception {
+        Team emptyTeam = new TransactionTemplate(transactionManager).execute(tx -> {
+            Team created = teams.save(Team.create("작업 없는 팀", UUID.randomUUID().toString()));
+            members.save(TeamMember.create(created.getId(), owner.getId(), MemberRole.OWNER));
+            return created;
+        });
+        try (HttpClient client = loggedInClient(owner)) {
+            JsonNode empty = assertSuccess(webGet(client, emptyTeam.getId(), ""));
+            assertItems(empty);
+            assertPage(empty, 0, 20, 0, 0, false);
+        }
+        try (HttpClient client = loggedInClient(outsider)) {
+            assertError(webGet(client, emptyTeam.getId(), ""), 403, "ACCESS_DENIED");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"status=UNKNOWN", "page=-1", "page=abc", "page=1.5", "page=2147483648",
+            "size=0", "size=-1", "size=101", "size=abc", "size=1.5", "size=2147483648"})
+    void webListRejectsInvalidQueryParameters(String query) throws Exception {
+        try (HttpClient client = loggedInClient(owner)) {
+            assertError(webGet(client, team.getId(), "?" + query), 400, "VALIDATION_FAILED");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "-1", "abc", "9223372036854775808"})
+    void webListRejectsInvalidTeamId(String teamId) throws Exception {
+        try (HttpClient client = loggedInClient(owner)) {
+            assertError(client.send(request("/api/v1/web/teams/" + teamId + "/tasks").GET().build(),
+                    HttpResponse.BodyHandlers.ofString()), 400, "VALIDATION_FAILED");
+        }
+    }
+
+    @Test
+    void webListRejectsMissingOrInvalidSessionAndAgentTokenAlone() throws Exception {
+        String path = webListPath(team.getId());
+        assertError(get(path, null), 401, "AUTHENTICATION_REQUIRED");
+        assertError(get(path, callerAgent.token()), 401, "AUTHENTICATION_REQUIRED");
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            assertError(client.send(request(path).header("Cookie", "JSESSIONID=invalid-session").GET().build(),
+                    HttpResponse.BodyHandlers.ofString()), 401, "AUTHENTICATION_REQUIRED");
+        }
+    }
+
+    @Test
+    void webListRejectsOtherTeamAndMissingTeam() throws Exception {
+        try (HttpClient client = loggedInClient(outsider)) {
+            // Agent 토큰을 함께 보내도 로그인 사용자의 팀 권한을 대신하지 않는다.
+            assertError(client.send(request(webListPath(team.getId()))
+                    .header("Authorization", "Bearer " + callerAgent.token()).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()), 403, "ACCESS_DENIED");
+            JsonNode ownTeam = assertSuccess(webGet(client, otherTeam.getId(), ""));
+            assertItems(ownTeam, "otherTeamPending");
+            assertError(webGet(client, Long.MAX_VALUE, ""), 404, "RESOURCE_NOT_FOUND");
+            assertCurrentUser(client, outsider.getId());
+        }
+    }
+
+    @Test
+    void webListRechecksMembershipOnEachRequest() throws Exception {
+        try (HttpClient client = loggedInClient(owner)) {
+            assertSuccess(webGet(client, team.getId(), ""));
+            jdbc.update("delete from team_members where team_id = ? and user_id = ?", team.getId(), owner.getId());
+            assertError(webGet(client, team.getId(), ""), 403, "ACCESS_DENIED");
+        }
+    }
+
+    @Test
+    void webListRefreshesStoredActivityWithoutChangingTaskOrHistory() throws Exception {
+        Long taskId = taskIds.get("sentPending");
+        try (HttpClient client = loggedInClient(owner)) {
+            JsonNode first = assertSuccess(webGet(client, team.getId(), ""));
+            assertTimestamp(findItem(first, "sentPending").path("lastActivityAt"), BASE_TIME);
+            new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+                createEvent(taskId, TaskEventType.STATUS_CHANGED, "작업 수락", BASE_TIME.plusMinutes(15));
+                createEvent(taskId, TaskEventType.ACK_RECEIVED, null, BASE_TIME.plusHours(3));
+            });
+            Map<String, Object> taskBefore = jdbc.queryForMap("select * from tasks where id = ?", taskId);
+            List<Map<String, Object>> eventsBefore = jdbc.queryForList(
+                    "select * from task_events where task_id = ? order by sequence", taskId);
+
+            JsonNode refreshed = assertSuccess(webGet(client, team.getId(), ""));
+            assertTimestamp(findItem(refreshed, "sentPending").path("lastActivityAt"), BASE_TIME.plusMinutes(15));
+            assertThat(assertSuccess(webGet(client, team.getId(), ""))).isEqualTo(refreshed);
+            assertThat(jdbc.queryForMap("select * from tasks where id = ?", taskId)).isEqualTo(taskBefore);
+            assertThat(jdbc.queryForList("select * from task_events where task_id = ? order by sequence", taskId))
+                    .isEqualTo(eventsBefore);
+        }
+    }
+
+    private HttpClient loggedInClient(User user) throws Exception {
+        HttpClient client = HttpClient.newBuilder()
+                .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL)).build();
+        try {
+            loginAs(client, user);
+            return client;
+        } catch (Exception | Error e) {
+            client.close();
+            throw e;
+        }
+    }
+
+    private String webListPath(Long teamId) {
+        return "/api/v1/web/teams/" + teamId + "/tasks";
+    }
+
+    private HttpResponse<String> webGet(HttpClient client, Long teamId, String query) throws Exception {
+        return client.send(request(webListPath(teamId) + query).GET().build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
     void rejectsRequestWithoutAgentToken() throws Exception {
         assertError(getTasks(null, ""), 401, "AUTHENTICATION_REQUIRED");
     }
@@ -235,6 +437,10 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
 
             JsonNode detail = assertSuccess(get(detailPath(taskIds.get("sentPending")), callerAgent.token()));
             assertTimestamp(detail.path("lastActivityAt"), BASE_TIME.plusMinutes(20));
+            try (HttpClient client = loggedInClient(owner)) {
+                JsonNode web = assertSuccess(webGet(client, team.getId(), ""));
+                assertTimestamp(findItem(web, "sentPending").path("lastActivityAt"), BASE_TIME.plusMinutes(20));
+            }
         } finally {
             TimeZone.setDefault(originalZone);
         }

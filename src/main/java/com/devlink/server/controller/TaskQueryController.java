@@ -1,6 +1,8 @@
 package com.devlink.server.controller;
 
 import com.devlink.server.common.ApiResponse;
+import com.devlink.server.domain.UserPrincipal;
+import com.devlink.server.dto.task.WebTaskListRequest;
 import com.devlink.server.dto.task.TaskEventListRequest;
 import com.devlink.server.dto.task.TaskEventListResponse;
 import com.devlink.server.dto.task.TaskDetailResponse;
@@ -26,6 +28,16 @@ public class TaskQueryController {
 
     private final TaskQueryService taskQueryService;
 
+    @GetMapping("/web/teams/{teamId}/tasks")
+    public ResponseEntity<ApiResponse<TaskListResponse>> getWebTasks(
+    		@PathVariable @Positive Long teamId,
+    		@AuthenticationPrincipal UserPrincipal user,
+    		@Valid @ModelAttribute WebTaskListRequest request){
+    	TaskListResponse response = taskQueryService.getWebTasks(teamId, user, request);
+    	
+    	return ResponseEntity.ok(ApiResponse.success(response));
+    }
+    
     @GetMapping("/teams/{teamId}/tasks")
     public ResponseEntity<ApiResponse<TaskListResponse>> getTasks(
             @PathVariable @Positive Long teamId,

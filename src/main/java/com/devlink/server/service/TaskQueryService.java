@@ -1,6 +1,8 @@
 package com.devlink.server.service;
 
 import org.springframework.stereotype.Service;
+import com.devlink.server.domain.UserPrincipal;
+import com.devlink.server.dto.task.WebTaskListRequest;
 import com.devlink.server.dto.task.TaskEventListResponse;
 import com.devlink.server.dto.task.TaskFileResponse;
 import com.devlink.server.common.BusinessException;
@@ -52,6 +54,25 @@ public class TaskQueryService {
 	private final TaskRepository taskRepository;
 	private final TaskFileRepository taskFileRepository;
 	private final TaskEventRepository taskEventRepository;
+	private final TeamAuthorizationService teamAuthorizationService;
+	
+	@Transactional(readOnly = true)
+	public TaskListResponse getWebTasks(
+		Long teamId,
+		UserPrincipal user,
+		WebTaskListRequest request) {
+		
+		if(user == null) {
+			throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
+		}
+		
+		teamAuthorizationService.requireTeamMember(user.userId(), teamId);
+		Pageable pageable = PageRequest.of(request.page(), request.size());
+		
+		Page<Task> taskPage = taskRepository.findTeamTasks(teamId, request.status(), pageable);
+		
+		return toListResponse(taskPage);
+	}
 	
 	@Transactional(readOnly = true)
 	public TaskListResponse getTasks(

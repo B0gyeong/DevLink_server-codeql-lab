@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 public record TaskListItemResponse(
         Long taskId,
         Long teamId,
+        String taskSummary,
         TaskAgentResponse requesterAgent,
         TaskAgentResponse receiverAgent,
         TaskStatus status,

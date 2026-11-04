@@ -98,6 +98,30 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"mine", "team"})
+    void returnsStoredTaskSummaryInList(String scope) throws Exception {
+        String summary = "게시글 목록 API 응답 지연 분석\n검증 항목 확인 😀";
+        jdbc.update("update tasks set task_summary = ? where id = ?",
+                summary, taskIds.get("sentCompleted"));
+
+        JsonNode data = assertSuccess(getTasks(callerAgent.token(), "?scope=" + scope));
+        JsonNode item = findItem(data, "sentCompleted");
+
+        assertThat(item.has("taskSummary")).isTrue();
+        assertThat(item.get("taskSummary").asText()).isEqualTo(summary);
+    }
+
+    @Test
+    void returnsExplicitNullWhenTaskHasNoSummary() throws Exception {
+        JsonNode data = assertSuccess(getTasks(callerAgent.token(),
+                "?direction=sent&status=COMPLETED"));
+        JsonNode item = findItem(data, "sentCompleted");
+
+        assertThat(item.has("taskSummary")).isTrue();
+        assertThat(item.get("taskSummary").isNull()).isTrue();
+    }
+
     @Test
     void usesMineAllAndDefaultPaginationWhenQueryIsOmitted() throws Exception {
         JsonNode data = assertSuccess(getTasks(callerAgent.token(), ""));

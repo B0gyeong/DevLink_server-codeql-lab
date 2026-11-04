@@ -243,7 +243,9 @@ public class TaskQueryService {
 	}
 	
 	private TaskListItemResponse toListItem(Task task,Agent requesterAgent,Agent receiverAgent) {
-		return new TaskListItemResponse(task.getId(),task.getTeamId(),
+		return new TaskListItemResponse(task.getId(),
+				task.getTeamId(),
+				task.getTaskSummary(),
 				new TaskAgentResponse(
 						requesterAgent.getId(),requesterAgent.getName()),
 				new TaskAgentResponse(

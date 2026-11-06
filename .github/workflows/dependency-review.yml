@@ -8,11 +8,23 @@ permissions:
   contents: read
 
 jobs:
+  submit-dependencies:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/dependency-submission.yml
+
   dependency-review:
     name: Dependency Review
+    needs: submit-dependencies
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Require successful dependency submission
+        env:
+          SUBMISSION_RESULT: ${{ needs.submit-dependencies.result }}
+        run: test "$SUBMISSION_RESULT" = success
+
       - name: Review dependency changes
         uses: actions/dependency-review-action@v5
         with:

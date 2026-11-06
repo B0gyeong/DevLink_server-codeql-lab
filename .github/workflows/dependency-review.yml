@@ -18,5 +18,6 @@ jobs:
         with:
           fail-on-severity: high
           warn-only: false
+          show-openssf-scorecard: false
           retry-on-snapshot-warnings: true
           retry-on-snapshot-warnings-timeout: 600

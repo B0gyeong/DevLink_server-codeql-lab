@@ -2,8 +2,9 @@ name: Dependency Submission
 
 on:
   push:
-    branches: ['**']
+    branches: [develop]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -15,10 +16,13 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+    env:
+      GITHUB_DEPENDENCY_GRAPH_JOB_CORRELATOR: dependency_submission-submit
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-java@v5
         with:

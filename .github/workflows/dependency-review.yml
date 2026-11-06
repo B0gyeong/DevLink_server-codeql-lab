@@ -1,0 +1,35 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  submit-dependencies:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/dependency-submission.yml
+
+  dependency-review:
+    name: Dependency Review
+    needs: submit-dependencies
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require successful dependency submission
+        env:
+          SUBMISSION_RESULT: ${{ needs.submit-dependencies.result }}
+        run: test "$SUBMISSION_RESULT" = success
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+          warn-only: false
+          show-openssf-scorecard: false
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
